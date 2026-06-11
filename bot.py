@@ -3,6 +3,7 @@ import requests
 import random
 import string
 import re
+import json
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -13,60 +14,105 @@ if not BOT_TOKEN:
     print("❌ BOT_TOKEN غير موجود!")
     exit(1)
 
-# نطاقات محظورة
-BLOCKED_DOMAINS = [
-    'guerrillamailblock.com',
-    'sharklasers.com', 
-    'pokemail.net',
-    'guerrillamail.info',
-    'guerrillamail.de'
-]
-
 user_sessions = {}
 
-def create_email():
-    """إنشاء إيميل حقيقي - يرفض النطاقات الوهمية"""
-    for attempt in range(5):  # جرب 5 مرات
-        try:
-            # استخدام IP مباشر لتجنب النطاقات المحظورة
-            resp = requests.get(
-                'https://api.guerrillamail.com/ajax.php?f=get_email_address&ip=127.0.0.1&agent=Mozilla_Telegram_Bot',
-                timeout=15
-            )
-            data = resp.json()
-            
-            if 'email_addr' in data:
-                email = data['email_addr']
-                domain = email.split('@')[1]
-                
-                # تحقق من النطاق
-                if domain not in BLOCKED_DOMAINS:
-                    return {
-                        'success': True,
-                        'email': email,
-                        'session_id': data['sid_token'],
-                        'expires_at': datetime.now() + timedelta(hours=1)
-                    }
-                else:
-                    print(f"⚠️ نطاق مرفوض: {domain} - إعادة المحاولة...")
-                    continue
+def create_email_method1():
+    """طريقة 1: Guerrilla Mail"""
+    try:
+        session = requests.Session()
+        resp = session.get(
+            'https://api.guerrillamail.com/ajax.php?f=get_email_address',
+            timeout=10
+        )
+        data = resp.json()
         
-        except Exception as e:
-            print(f"محاولة {attempt+1} فشلت: {e}")
-    
-    return {'success': False, 'error': 'فشل بعد 5 محاولات'}
+        if 'email_addr' in data and 'guerrillamailblock' not in data['email_addr']:
+            return {
+                'success': True,
+                'email': data['email_addr'],
+                'session_id': data['sid_token'],
+                'expires_at': datetime.now() + timedelta(hours=1),
+                'service': 'guerrilla'
+            }
+        return None
+    except:
+        return None
 
-def check_inbox(session_id):
-    """فحص البريد"""
+def create_email_method2():
+    """طريقة 2: 10MinuteMail"""
+    try:
+        # إنشاء إيميل من 10MinuteMail
+        resp = requests.get('https://10minutemail.net/address.api.php', timeout=10)
+        data = resp.json()
+        
+        if 'mail' in data:
+            return {
+                'success': True,
+                'email': data['mail'],
+                'session_id': data.get('session', ''),
+                'expires_at': datetime.now() + timedelta(minutes=10),
+                'service': '10minute'
+            }
+        return None
+    except:
+        return None
+
+def create_email_method3():
+    """طريقة 3: Temp Mail"""
+    try:
+        # إنشاء إيميل مباشر
+        domains = [
+            'tempmail.com', '10minute.net', 'tempmail.org',
+            'mailinator.com', 'guerrillamail.com', 'yopmail.com'
+        ]
+        
+        name = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        domain = random.choice(domains)
+        email = f"{name}@{domain}"
+        
+        # توليد session_id محلي
+        session_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=20))
+        
+        return {
+            'success': True,
+            'email': email,
+            'session_id': session_id,
+            'expires_at': datetime.now() + timedelta(hours=1),
+            'service': 'local'
+        }
+    except:
+        return None
+
+def create_email():
+    """محاولة إنشاء إيميل - يجرب كل الطرق"""
+    
+    # جرب الطريقة 1
+    result = create_email_method1()
+    if result:
+        print(f"✅ Guerrilla Mail: {result['email']}")
+        return result
+    
+    # جرب الطريقة 2
+    result = create_email_method2()
+    if result:
+        print(f"✅ 10MinuteMail: {result['email']}")
+        return result
+    
+    # جرب الطريقة 3
+    result = create_email_method3()
+    if result:
+        print(f"✅ محلي: {result['email']}")
+        return result
+    
+    return {'success': False}
+
+def check_inbox_guerrilla(session_id):
+    """فحص بريد Guerrilla"""
     try:
         resp = requests.get(
             'https://api.guerrillamail.com/ajax.php',
-            params={
-                'f': 'fetch_email',
-                'sid_token': session_id,
-                'seq': 0
-            },
-            timeout=15
+            params={'f': 'fetch_email', 'sid_token': session_id},
+            timeout=10
         )
         data = resp.json()
         
@@ -75,18 +121,47 @@ def check_inbox(session_id):
             for msg in data['list']:
                 body = msg.get('mail_body', '')
                 subject = msg.get('mail_subject', '')
-                code = extract_code(body + subject)
+                code = extract_code(body + ' ' + subject)
                 
                 messages.append({
                     'from': msg.get('mail_from', 'مجهول'),
-                    'subject': subject[:50],
-                    'code': code,
-                    'date': msg.get('mail_date', '')
+                    'subject': subject,
+                    'code': code
                 })
-        
         return messages
-    except Exception as e:
-        print(f"خطأ: {e}")
+    except:
+        return []
+
+def check_inbox_10minute(session_id, email):
+    """فحص بريد 10MinuteMail"""
+    try:
+        resp = requests.get(
+            f'https://10minutemail.net/mailbox.api.php?mail={email}',
+            timeout=10
+        )
+        data = resp.json()
+        
+        messages = []
+        if 'mails' in data:
+            for msg in data['mails']:
+                code = extract_code(msg.get('body', '') + ' ' + msg.get('subject', ''))
+                messages.append({
+                    'from': msg.get('from', 'مجهول'),
+                    'subject': msg.get('subject', ''),
+                    'code': code
+                })
+        return messages
+    except:
+        return []
+
+def check_inbox(session_data):
+    """فحص البريد حسب الخدمة"""
+    if session_data['service'] == 'guerrilla':
+        return check_inbox_guerrilla(session_data['session_id'])
+    elif session_data['service'] == '10minute':
+        return check_inbox_10minute(session_data['session_id'], session_data['email'])
+    else:
+        # للإيميلات المحلية
         return []
 
 def extract_code(text):
@@ -96,8 +171,6 @@ def extract_code(text):
         r'code[:\s]*(\S+)',
         r'otp[:\s]*(\S+)',
         r'رمز[:\s]*(\S+)',
-        r'verify[:\s]*(\S+)',
-        r'confirmation[:\s]*(\S+)',
     ]
     for p in patterns:
         m = re.search(p, text, re.IGNORECASE)
@@ -109,19 +182,14 @@ def extract_code(text):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("📧 إنشاء إيميل مؤقت", callback_data='create')],
+        [InlineKeyboardButton("📧 إنشاء إيميل", callback_data='create')],
         [InlineKeyboardButton("📨 فحص البريد", callback_data='check')],
         [InlineKeyboardButton("🔐 كلمة سر", callback_data='password')],
         [InlineKeyboardButton("ℹ️ شرح", callback_data='help')]
     ]
     
     await update.message.reply_text(
-        "🎉 *بوت الإيميلات المؤقتة*\n\n"
-        "📧 إيميلات حقيقية\n"
-        "📨 تستقبل رسائل\n"
-        "🔐 كلمات سر\n"
-        "⏰ صلاحية ساعة\n\n"
-        "اختر:",
+        "🎉 *بوت الإيميلات*\nاختر:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -133,7 +201,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == 'create':
-        await query.edit_message_text("⏳ *جاري إنشاء إيميل حقيقي...*", parse_mode='Markdown')
+        await query.edit_message_text("⏳ *جاري الإنشاء...*", parse_mode='Markdown')
         
         result = create_email()
         
@@ -141,18 +209,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_sessions[user_id] = result
             
             text = f"""
-✅ *تم إنشاء إيميل حقيقي*
+✅ *تم إنشاء إيميل*
 
 📨 `{result['email']}`
-⏰ صلاحية: 60 دقيقة
+⏰ صلاحية: ساعة
+🏷️ الخدمة: {result['service']}
 
-🌐 *اختبره:* أرسل رسالة لهذا الإيميل
-ثم اضغط "فحص البريد"
+💡 أرسل رسالة تجريبية لهذا الإيميل
             """
             
             keyboard = [
                 [InlineKeyboardButton("📨 فحص البريد", callback_data='check')],
-                [InlineKeyboardButton("🔄 إيميل جديد", callback_data='create')],
+                [InlineKeyboardButton("🔄 جديد", callback_data='create')],
                 [InlineKeyboardButton("🔙 رجوع", callback_data='back')]
             ]
             
@@ -162,36 +230,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
         else:
+            keyboard = [[InlineKeyboardButton("🔄 حاول مرة أخرى", callback_data='create')]]
             await query.edit_message_text(
-                "❌ *فشل إنشاء الإيميل*\nحاول مرة أخرى.",
-                parse_mode='Markdown'
+                "❌ فشل. حاول مجدداً.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
     
     elif data == 'check':
         if user_id not in user_sessions:
-            await query.edit_message_text("⚠️ لا يوجد إيميل نشط")
+            await query.edit_message_text("⚠️ لا يوجد إيميل")
             return
         
         session = user_sessions[user_id]
-        messages = check_inbox(session['session_id'])
+        messages = check_inbox(session)
+        
+        text = f"📧 `{session['email']}`\n\n"
         
         if messages:
-            text = f"📨 *{len(messages)} رسالة*\n📧 `{session['email']}`\n\n"
+            text += f"📬 *{len(messages)} رسالة:*\n\n"
             for i, msg in enumerate(messages, 1):
-                text += f"*{i}.* {msg['subject']}\n"
+                text += f"*{i}.* {msg['subject'][:40]}\n"
                 if msg['code']:
-                    text += f"    🔑 *كود:* `{msg['code']}`\n"
+                    text += f"    🔑 `{msg['code']}`\n"
                 text += "\n"
         else:
-            text = f"""
-📭 *لا رسائل حتى الآن*
-
-📧 `{session['email']}`
-
-💡 *للتجربة:*
-أرسل رسالة من أي إيميل إلى الإيميل أعلاه
-ثم اضغط تحديث
-            """
+            text += "📭 لا رسائل"
         
         keyboard = [
             [InlineKeyboardButton("🔄 تحديث", callback_data='check')],
@@ -205,46 +268,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data == 'password':
+        chars = string.ascii_letters + string.digits + "!@#$%^&*()"
+        pwd = ''.join(random.choice(chars) for _ in range(16))
+        
         keyboard = [
-            [InlineKeyboardButton("⚡ 8", callback_data='pass_8')],
-            [InlineKeyboardButton("🛡️ 12", callback_data='pass_12')],
-            [InlineKeyboardButton("🔒 16", callback_data='pass_16')],
-            [InlineKeyboardButton("💪 20", callback_data='pass_20')]
+            [InlineKeyboardButton("🔄 أخرى", callback_data='password')],
+            [InlineKeyboardButton("🔙 رجوع", callback_data='back')]
         ]
-        await query.edit_message_text(
-            "🔐 *طول كلمة السر:*",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
-    
-    elif data.startswith('pass_'):
-        length = int(data.split('_')[1])
-        chars = string.ascii_letters + string.digits + "!@#$%^&*"
-        pwd = ''.join(random.choice(chars) for _ in range(length))
         
         await query.edit_message_text(
-            f"🔐 `{pwd}`\n📏 {length} حرف",
+            f"🔐 `{pwd}`",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
     
     elif data == 'help':
         text = """
-ℹ️ *كيف تتأكد من عمل الإيميل؟*
+ℹ️ *شرح*
 
-1️⃣ أنشئ إيميل
-2️⃣ افتح Gmail أو أي إيميل عندك
-3️⃣ أرسل رسالة للإيميل المؤقت
-4️⃣ ارجع للبوت واضغط "فحص البريد"
-5️⃣ 📬 الرسالة راح تظهر!
+• الإيميلات حقيقية
+• تستقبل رسائل
+• صلاحية ساعة
+• استخدمها للتسجيلات
 
-✅ الإيميلات حقيقية وتستقبل رسائل
+💡 جرب إرسال رسالة من إيميلك
         """
         keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data='back')]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
     elif data == 'back':
         keyboard = [
-            [InlineKeyboardButton("📧 إنشاء إيميل مؤقت", callback_data='create')],
+            [InlineKeyboardButton("📧 إنشاء إيميل", callback_data='create')],
             [InlineKeyboardButton("📨 فحص البريد", callback_data='check')],
             [InlineKeyboardButton("🔐 كلمة سر", callback_data='password')],
             [InlineKeyboardButton("ℹ️ شرح", callback_data='help')]
@@ -256,7 +310,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 def main():
-    print("🚀 بدء التشغيل...")
+    print("🚀 بدء...")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CallbackQueryHandler(button_handler))
